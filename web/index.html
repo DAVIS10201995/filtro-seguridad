@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filtro de seguridad</title>
+<style>
+  :root { --rojo:#e5484d; --verde:#30a46c; --fondo:#f4f5f7; --tarjeta:#fff; --texto:#1c2024; --gris:#6b7280; --borde:#e2e4e8; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--fondo); color:var(--texto); }
+  header { background:#1c2024; color:#fff; padding:14px 20px; display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  .chip { font-size:12px; padding:3px 10px; border-radius:99px; background:#f5a524; color:#1c2024; font-weight:600; }
+  main { max-width:900px; margin:20px auto; padding:0 16px; display:grid; gap:16px; grid-template-columns:1fr 1fr; }
+  .card { background:var(--tarjeta); border:1px solid var(--borde); border-radius:12px; padding:18px; }
+  .card h2 { font-size:15px; margin:0 0 14px; color:var(--gris); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .ancho { grid-column:1 / -1; }
+  .estado { display:flex; align-items:center; gap:18px; }
+  .foco { width:70px; height:70px; border-radius:50%; background:#d1d5db; flex-shrink:0; transition:.2s; }
+  .foco.rojo { background:var(--rojo); box-shadow:0 0 24px var(--rojo); }
+  .foco.verde { background:var(--verde); box-shadow:0 0 24px var(--verde); }
+  .grande { font-size:24px; font-weight:700; }
+  .sub { color:var(--gris); margin-top:4px; }
+  .botones { display:flex; gap:10px; flex-wrap:wrap; }
+  button { border:0; border-radius:8px; padding:10px 16px; font-size:15px; font-weight:600; cursor:pointer; background:#1c2024; color:#fff; }
+  button.verde { background:var(--verde); } button.rojo { background:var(--rojo); } button.claro { background:#e5e7eb; color:var(--texto); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=text], select { width:100%; padding:10px; border:1px solid var(--borde); border-radius:8px; font-size:15px; margin-bottom:10px; }
+  label { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--borde); }
+  th { color:var(--gris); font-weight:600; }
+  .ok { color:var(--verde); font-weight:700; } .no { color:var(--rojo); font-weight:700; }
+  #aviso { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#1c2024; color:#fff; padding:10px 18px; border-radius:8px; display:none; }
+  @media (max-width:700px) { main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔒 Filtro de seguridad</h1>
+  <span class="chip" id="chipSim" style="display:none">MODO SIMULACIÓN</span>
+</header>
+
+<main>
+  <section class="card ancho">
+    <h2>Estado</h2>
+    <div class="estado">
+      <div class="foco" id="foco"></div>
+      <div>
+        <div class="grande" id="puerta">—</div>
+        <div class="sub" id="paso">Conectando...</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Control</h2>
+    <div class="botones">
+      <button class="verde" id="btnAbrir" onclick="api('/api/abrir')">Abrir puerta</button>
+      <button class="rojo" onclick="api('/api/cerrar')">Cerrar puerta</button>
+      <button class="claro" id="btnSistema" onclick="alternarSistema()">Pausar sistema</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Mensaje por bocina</h2>
+    <input type="text" id="texto" maxlength="150" placeholder="Ej. Por favor espere">
+    <button onclick="api('/api/decir', {texto: document.getElementById('texto').value})">Decir</button>
+  </section>
+
+  <section class="card ancho" id="panelSim" style="display:none">
+    <h2>Simular tarjeta (sin hardware)</h2>
+    <select id="uid"></select>
+    <label><input type="checkbox" id="caraOk" checked> La cara coincide</label>
+    <label><input type="checkbox" id="vozOk" checked> La contraseña es correcta</label>
+    <button onclick="simular()">Pasar tarjeta</button>
+  </section>
+
+  <section class="card ancho">
+    <h2>Registro de accesos</h2>
+    <table>
+      <thead><tr><th>Hora</th><th>Usuario</th><th>Evento</th><th>Resultado</th></tr></thead>
+      <tbody id="registros"><tr><td colspan="4">Sin eventos</td></tr></tbody>
+    </table>
+  </section>
+</main>
+<div id="aviso"></div>
+
+<script>
+let activo = true, usuariosCargados = false;
+
+function aviso(msg) {
+  const a = document.getElementById('aviso');
+  a.textContent = msg; a.style.display = 'block';
+  clearTimeout(a._t); a._t = setTimeout(() => a.style.display = 'none', 2500);
+}
+
+async function api(url, datos) {
+  try {
+    const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(datos || {}) });
+    const j = await r.json();
+    if (!j.ok) aviso(j.mensaje || 'No se pudo');
+    actualizar();
+    return j;
+  } catch (e) { aviso('Sin conexión con la Raspberry'); }
+}
+
+function alternarSistema() { api('/api/sistema', {activo: !activo}); }
+
+function simular() {
+  api('/api/simular_tarjeta', {
+    uid: document.getElementById('uid').value,
+    cara_ok: document.getElementById('caraOk').checked,
+    voz_ok: document.getElementById('vozOk').checked,
+  });
+  aviso('Tarjeta enviada');
+}
+
+function escapar(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+
+async function actualizar() {
+  try {
+    const e = await (await fetch('/api/estado')).json();
+    activo = e.activo;
+    document.getElementById('foco').className = 'foco ' + e.led;
+    document.getElementById('puerta').textContent = e.puerta === 'abierta' ? 'Puerta ABIERTA' : 'Puerta CERRADA';
+    document.getElementById('paso').textContent = e.paso;
+    document.getElementById('btnSistema').textContent = e.activo ? 'Pausar sistema' : 'Reanudar sistema';
+    document.getElementById('btnAbrir').disabled = e.puerta === 'abierta';
+
+    document.getElementById('chipSim').style.display = e.simulacion ? 'inline' : 'none';
+    document.getElementById('panelSim').style.display = e.simulacion ? 'block' : 'none';
+    if (e.simulacion && !usuariosCargados) {
+      const sel = document.getElementById('uid');
+      sel.innerHTML = e.usuarios.map(u => `<option value="${u.uid}">${escapar(u.nombre)} (${u.uid})</option>`).join('')
+                    + '<option value="111">Tarjeta desconocida (111)</option>';
+      usuariosCargados = true;
+    }
+
+    const filas = e.registros.map(r => `<tr><td>${r.hora}</td><td>${escapar(r.usuario)}</td><td>${escapar(r.evento)}</td>
+      <td class="${r.resultado === 'DENEGADO' ? 'no' : 'ok'}">${r.resultado}</td></tr>`).join('');
+    document.getElementById('registros').innerHTML = filas || '<tr><td colspan="4">Sin eventos</td></tr>';
+  } catch (err) {
+    document.getElementById('paso').textContent = 'Sin conexión con la Raspberry';
+  }
+}
+
+actualizar();
+setInterval(actualizar, 1000);
+</script>
+</body>
+</html>

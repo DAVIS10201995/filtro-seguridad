@@ -4,179 +4,147 @@ FILTRO DE SEGURIDAD - 3 factores
   2) Reconocimiento facial (cámara + OpenCV LBPH)
   3) Contraseña por voz (micrófono + SpeechRecognition)
 Actuadores: LED rojo, LED verde, bocina (espeak-ng) y servomotor.
-"""
-import subprocess
-import time
-import unicodedata
 
-import cv2
-import RPi.GPIO as GPIO
-import speech_recognition as sr
-from mfrc522 import SimpleMFRC522
+Se puede correr solo (python control_acceso.py) o junto con la página web (python app.py).
+"""
+import threading
+import time
+from collections import deque
+from datetime import datetime
 
 import config
-from camara import Camara, ruta_haarcascade
-
-# ------------------------------------------------------------------ GPIO
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BOARD)          # antes de crear el lector RC522
-GPIO.setup(config.PIN_LED_ROJO, GPIO.OUT)
-GPIO.setup(config.PIN_LED_VERDE, GPIO.OUT)
-GPIO.setup(config.PIN_SERVO, GPIO.OUT)
-servo = GPIO.PWM(config.PIN_SERVO, 50)   # 50 Hz para servos
-servo.start(0)
-lector = SimpleMFRC522()
+from hardware import crear_hardware
 
 
-# ------------------------------------------------------------------ ACTUADORES
-def led_rojo():
-    GPIO.output(config.PIN_LED_VERDE, GPIO.LOW)
-    GPIO.output(config.PIN_LED_ROJO, GPIO.HIGH)
+class SistemaAcceso:
+    def __init__(self):
+        self.hw = crear_hardware()
+        self.lock_actuadores = threading.Lock()   # servo/LEDs: una acción a la vez
+        self.lock_voz = threading.Lock()          # que no hablen dos cosas al mismo tiempo
+        self.activo = True        # False = pausado desde la web (no lee tarjetas)
+        self.corriendo = True
+        self.puerta = "cerrada"
+        self.led_actual = "rojo"
+        self.paso = "Iniciando"
+        self._cerrar_ahora = False
+        self.registros = deque(maxlen=30)
+        self._led("rojo")
+        self.hw.servo(config.SERVO_CERRADO)
 
+    # ---------------------------------------------------------- utilidades
+    def _led(self, color):
+        self.hw.led(color)
+        self.led_actual = color
 
-def led_verde():
-    GPIO.output(config.PIN_LED_ROJO, GPIO.LOW)
-    GPIO.output(config.PIN_LED_VERDE, GPIO.HIGH)
+    def decir(self, texto):
+        with self.lock_voz:
+            self.hw.decir(texto)
 
+    def registrar(self, evento, resultado, usuario="-"):
+        self.registros.appendleft({
+            "hora": datetime.now().strftime("%H:%M:%S"),
+            "usuario": usuario,
+            "evento": evento,
+            "resultado": resultado,
+        })
+        print(f"[REGISTRO] {usuario} | {evento} | {resultado}")
 
-def parpadear_rojo(veces=3):
-    for _ in range(veces):
-        GPIO.output(config.PIN_LED_ROJO, GPIO.LOW)
-        time.sleep(0.2)
-        GPIO.output(config.PIN_LED_ROJO, GPIO.HIGH)
-        time.sleep(0.2)
+    def estado(self):
+        datos = {
+            "simulacion": self.hw.simulado,
+            "activo": self.activo,
+            "puerta": self.puerta,
+            "led": self.led_actual,
+            "paso": self.paso,
+            "registros": list(self.registros),
+        }
+        if self.hw.simulado:
+            datos["usuarios"] = [{"uid": uid, "nombre": u["nombre"]} for uid, u in config.USUARIOS.items()]
+        return datos
 
+    # ---------------------------------------------------------- actuadores
+    def abrir_puerta(self, mensaje=None):
+        """LED verde, mensaje, abre el servo, espera y cierra. False si ya estaba ocupada."""
+        if not self.lock_actuadores.acquire(blocking=False):
+            return False
+        try:
+            self._cerrar_ahora = False
+            self._led("verde")
+            if mensaje:
+                self.decir(mensaje)
+            self.puerta = "abierta"
+            self.hw.servo(config.SERVO_ABIERTO)
+            fin = time.time() + config.TIEMPO_ABIERTO
+            while time.time() < fin and not self._cerrar_ahora:
+                time.sleep(0.1)
+            self.hw.servo(config.SERVO_CERRADO)
+            self.puerta = "cerrada"
+            self._led("rojo")
+        finally:
+            self.lock_actuadores.release()
+        return True
 
-def mover_servo(angulo):
-    servo.ChangeDutyCycle(2.5 + angulo / 18.0)   # 0° = 2.5 %, 180° = 12.5 %
-    time.sleep(0.6)
-    servo.ChangeDutyCycle(0)                     # evita que tiemble
+    def cerrar_puerta(self):
+        self._cerrar_ahora = True
 
+    def denegar(self, motivo, usuario="-"):
+        self.registrar(motivo, "DENEGADO", usuario)
+        with self.lock_actuadores:
+            for _ in range(3):
+                self._led("apagado")
+                time.sleep(0.2)
+                self._led("rojo")
+                time.sleep(0.2)
+        self.decir("Acceso denegado")
 
-def decir(texto):
-    print(f"[BOCINA] {texto}")
-    subprocess.run(["espeak-ng", "-v", config.VOZ_ESPEAK, "-s", "150", texto],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-# ------------------------------------------------------------------ SENSORES
-def esperar_tarjeta():
-    print("\nEsperando tarjeta...")
-    uid = lector.read_id()          # bloquea hasta que pasen una tarjeta
-    print(f"[NFC] UID: {uid}")
-    return uid
-
-
-def reconocer_cara(id_esperado):
-    """True si la cámara reconoce al dueño de la tarjeta."""
-    modelo = cv2.face.LBPHFaceRecognizer_create()
-    modelo.read(config.ARCHIVO_MODELO)
-    detector = cv2.CascadeClassifier(ruta_haarcascade())
-    cam = Camara()
-    aciertos = 0
-    inicio = time.time()
-    try:
-        while time.time() - inicio < config.TIEMPO_MAX_CARA:
-            gris = cam.leer_gris()
-            if gris is None:
-                continue
-            caras = detector.detectMultiScale(gris, 1.2, 5, minSize=(60, 60))
-            for (x, y, w, h) in caras[:1]:
-                rostro = cv2.resize(gris[y:y + h, x:x + w], (150, 150))
-                etiqueta, confianza = modelo.predict(rostro)
-                print(f"[CÁMARA] id={etiqueta} confianza={confianza:.1f}")
-                if etiqueta == id_esperado and confianza < config.UMBRAL_CONFIANZA:
-                    aciertos += 1
-                    if aciertos >= config.COINCIDENCIAS_NECESARIAS:
-                        return True
-                else:
-                    aciertos = 0
-        return False
-    finally:
-        cam.cerrar()                # libera la cámara y RAM
-
-
-def normalizar(texto):
-    texto = unicodedata.normalize("NFD", texto.lower())
-    return "".join(c for c in texto if unicodedata.category(c) != "Mn").strip()
-
-
-def escuchar_contrasena(contrasena):
-    rec = sr.Recognizer()
-    with sr.Microphone() as fuente:
-        rec.adjust_for_ambient_noise(fuente, duration=0.5)
-        for intento in range(1, config.INTENTOS_CONTRASENA + 1):
-            decir("Diga la contraseña")
-            try:
-                audio = rec.listen(fuente, timeout=5, phrase_time_limit=4)
-                texto = normalizar(rec.recognize_google(audio, language=config.IDIOMA_RECONOCIMIENTO))
-                print(f"[MICRÓFONO] Escuché: '{texto}'")
-                if normalizar(contrasena) in texto:
-                    return True
-            except sr.WaitTimeoutError:
-                print("[MICRÓFONO] No se escuchó nada")
-            except sr.UnknownValueError:
-                print("[MICRÓFONO] No se entendió")
-            except sr.RequestError as e:
-                print(f"[MICRÓFONO] Error del servicio de voz: {e}")
-            if intento < config.INTENTOS_CONTRASENA:
-                decir("Contraseña incorrecta, intente de nuevo")
-    return False
-
-
-# ------------------------------------------------------------------ RESULTADOS
-def acceso_permitido(nombre):
-    led_verde()
-    decir(f"Acceso permitido. Bienvenido {nombre}")
-    mover_servo(config.SERVO_ABIERTO)
-    time.sleep(config.TIEMPO_ABIERTO)
-    mover_servo(config.SERVO_CERRADO)
-    led_rojo()
-
-
-def acceso_denegado(motivo):
-    print(f"[DENEGADO] {motivo}")
-    parpadear_rojo()
-    decir("Acceso denegado")
-
-
-# ------------------------------------------------------------------ PROGRAMA PRINCIPAL
-def main():
-    led_rojo()
-    mover_servo(config.SERVO_CERRADO)
-    decir("Sistema de seguridad listo")
-    while True:
-        # Paso 1: tarjeta
-        uid = esperar_tarjeta()
+    # ---------------------------------------------------------- flujo de acceso
+    def verificar(self, uid):
         usuario = config.USUARIOS.get(uid)
         if not usuario:
-            acceso_denegado("Tarjeta no registrada")
-            time.sleep(1)
-            continue
+            self.denegar(f"Tarjeta no registrada ({uid})")
+            return
+        nombre = usuario["nombre"]
 
-        # Paso 2: cara
-        decir(f"Hola {usuario['nombre']}, mire a la cámara")
-        if not reconocer_cara(usuario["id_rostro"]):
-            acceso_denegado("Rostro no reconocido")
-            time.sleep(1)
-            continue
-        decir("Rostro verificado")
+        self.paso = f"Verificando rostro de {nombre}"
+        self.decir(f"Hola {nombre}, mire a la cámara")
+        if not self.hw.reconocer_cara(usuario["id_rostro"]):
+            self.denegar("Rostro no reconocido", nombre)
+            return
+        self.decir("Rostro verificado")
 
-        # Paso 3: contraseña por voz
-        if not escuchar_contrasena(usuario["contrasena"]):
-            acceso_denegado("Contraseña incorrecta")
-            time.sleep(1)
-            continue
+        self.paso = f"Esperando contraseña de {nombre}"
+        if not self.hw.escuchar_contrasena(usuario["contrasena"], self.decir):
+            self.denegar("Contraseña incorrecta", nombre)
+            return
 
-        acceso_permitido(usuario["nombre"])
-        time.sleep(1)
+        self.registrar("Tarjeta + rostro + contraseña", "PERMITIDO", nombre)
+        self.paso = f"Puerta abierta para {nombre}"
+        self.abrir_puerta(f"Acceso permitido. Bienvenido {nombre}")
+
+    def bucle(self):
+        self.decir("Sistema de seguridad listo")
+        while self.corriendo:
+            if not self.activo:
+                self.paso = "Sistema pausado"
+                time.sleep(0.5)
+                continue
+            if self.puerta == "abierta":
+                time.sleep(0.2)
+                continue
+            self.paso = "Esperando tarjeta"
+            uid = self.hw.leer_tarjeta(timeout=1)
+            if uid is None:
+                continue
+            print(f"[NFC] UID: {uid}")
+            self.verificar(uid)
+            time.sleep(1)
 
 
 if __name__ == "__main__":
+    sistema = SistemaAcceso()
     try:
-        main()
+        sistema.bucle()
     except KeyboardInterrupt:
         print("\nSaliendo...")
     finally:
-        servo.stop()
-        GPIO.cleanup()
+        sistema.hw.cerrar()

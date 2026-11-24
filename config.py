@@ -1,6 +1,11 @@
 # ===================== CONFIGURACIÓN DEL FILTRO DE SEGURIDAD =====================
-# Pines en numeración FÍSICA (BOARD), la misma que usa la librería mfrc522 por defecto.
 
+# True  = sin sensores ni actuadores (todo se simula, ideal para probar la página web)
+# False = usa el hardware real conectado a la Raspberry
+# También puedes forzarlo al ejecutar:  SIMULAR=1 python app.py   /   SIMULAR=0 python app.py
+MODO_SIMULACION = True
+
+# Pines en numeración FÍSICA (BOARD), la misma que usa la librería mfrc522 por defecto.
 PIN_LED_ROJO = 11     # GPIO17
 PIN_LED_VERDE = 13    # GPIO27
 PIN_SERVO = 12        # GPIO18 (PWM)
@@ -36,3 +41,8 @@ INTENTOS_CONTRASENA = 2
 # Resolución baja para no saturar 1 GB de RAM
 ANCHO_CAMARA = 320
 ALTO_CAMARA = 240
+
+# Página web de control
+WEB_USUARIO = "admin"
+WEB_PASSWORD = "cambiar123"   # cámbiala
+WEB_PUERTO = 5000

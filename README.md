@@ -47,3 +47,17 @@ pip install mfrc522 RPi.GPIO spidev SpeechRecognition pyaudio opencv-contrib-pyt
 Tarjeta → ¿registrada? → cara → ¿coincide con el dueño de la tarjeta? → contraseña por voz →
 LED verde + "Acceso permitido" + servo abre 5 s → cierra y vuelve a rojo.
 Si falla cualquier paso: LED rojo parpadea + "Acceso denegado".
+
+## Página web de control
+
+```bash
+source ~/venv-voz/bin/activate
+pip install flask
+python app.py
+```
+Abre `http://IP_DE_LA_PI:5000` desde tu celular o PC (misma red). Usuario y contraseña: `WEB_USUARIO` / `WEB_PASSWORD` en `config.py`.
+
+Desde la página puedes ver si la puerta está abierta o cerrada y en qué paso va la verificación, abrirla o cerrarla de forma remota, pausar o reanudar el sistema, mandar un mensaje a la bocina y revisar el registro de los últimos 30 accesos.
+
+### Modo simulación
+Con `MODO_SIMULACION = True` en `config.py` no se necesita hardware: aparece un panel para "pasar una tarjeta" y elegir si la cara y la contraseña son correctas. Cuando tengas todo conectado, cámbialo a `False`.
